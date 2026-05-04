@@ -1,70 +1,71 @@
-# Getting Started with Create React App
+# OpenClaw AI Chat
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+一个基于 React + Express 的 AI 聊天应用，连接 OpenClaw Agent 实现实时对话。
 
-## Available Scripts
+## 功能特性
 
-In the project directory, you can run:
+- 用户注册/登录
+- 实时 AI 对话（WebSocket + SSE）
+- Markdown 消息渲染
+- 会话管理（创建/删除/切换）
+- 消息持久化（MySQL + Redis）
+- 分模块日志系统
 
-### `npm start`
+## 项目结构
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+```
+├── src/                    # React 前端
+│   ├── pages/             # 页面组件
+│   │   ├── AICommand.js   # AI 聊天页面
+│   │   ├── Login.js      # 登录页面
+│   │   └── Register.js   # 注册页面
+│   ├── App.js
+│   ├── App.css
+│   └── config.js         # API 配置
+├── server/                 # Express 后端
+│   ├── server.js         # 主服务
+│   ├── websocket.js      # WebSocket 客户端
+│   ├── worker.js         # 消息持久化 Worker
+│   ├── db.js            # 数据库操作
+│   └── logger.js        # 日志模块
+└── logs/                  # 日志目录
+```
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+## 快速开始
 
-### `npm test`
+### 安装依赖
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+```bash
+# 前端依赖
+npm install
 
-### `npm run build`
+# 后端依赖
+cd server && npm install
+```
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+### 启动服务
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+```bash
+# 启动后端 (端口 4000)
+cd server && node server.js
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+# 启动前端 (端口 3000)
+npm start
+```
 
-### `npm run eject`
+### 配置
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+1. 修改 `src/config.js` 中的 API 地址
+2. 配置 OpenClaw Agent 连接信息（token, IP 等）
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+## 技术栈
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+- **前端**: React, react-router-dom, react-markdown
+- **后端**: Express, WebSocket, SSE
+- **数据库**: MySQL
+- **缓存**: Redis
+- **AI**: OpenClaw Agent
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+## 许可证
 
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+MIT
