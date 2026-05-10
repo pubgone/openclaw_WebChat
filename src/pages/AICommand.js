@@ -1,7 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
-import API_CONFIG from '../config';
+
+// 动态获取 API 配置
+const getApiConfig = async () => {
+  try {
+    const response = await fetch('/api-config.json');
+    const config = await response.json();
+    return { BASE_URL: config.API_BASE_URL };
+  } catch {
+    return { BASE_URL: 'http://localhost:4000' };
+  }
+};
 
 function AICommand() {
   const [messages, setMessages] = useState([]);
@@ -16,11 +26,26 @@ function AICommand() {
   const [wsStatus, setWsStatus] = useState('disconnected');
   const messagesEndRef = useRef(null);
   const eventSourceRef = useRef(null);
+  const sseConvIdRef = useRef(null); // 当前 SSE 连接对应的 conversationId
+  const convertedCommandIdsRef = useRef(new Set()); // 已从 user 转换为 assistant 的 commandId，防止重复创建
+  const apiConfigRef = useRef({ BASE_URL: 'http://localhost:4000' }); // 默认值
+  const [configReady, setConfigReady] = useState(false);
   const navigate = useNavigate();
 
+  // 初始化 API 配置
   useEffect(() => {
-    checkAuth();
+    getApiConfig().then(config => {
+      apiConfigRef.current = config;
+      setConfigReady(true);
+    });
   }, []);
+
+  useEffect(() => {
+    // 等配置加载完成后才检查认证
+    if (configReady) {
+      checkAuth(apiConfigRef.current.BASE_URL);
+    }
+  }, [configReady]);
 
   useEffect(() => {
     scrollToBottom();
@@ -31,7 +56,7 @@ function AICommand() {
     if (!loading) {
       const wsPollInterval = setInterval(async () => {
         try {
-          const response = await fetch(`${API_CONFIG.BASE_URL}/api/ai/ws-status`);
+          const response = await fetch(`${apiConfigRef.current.BASE_URL}/api/ai/ws-status`);
           const data = await response.json();
           setWsStatus(data.wsStatus || 'disconnected');
         } catch (err) {
@@ -44,72 +69,87 @@ function AICommand() {
 
   // 连接 SSE 获取流式响应
   const connectSSE = useCallback((convId) => {
-    // 关闭之前的连接
+    console.log('[connectSSE] connecting to:', convId);
+
     if (eventSourceRef.current) {
+      console.log('[connectSSE] closing existing');
       eventSourceRef.current.close();
       eventSourceRef.current = null;
     }
 
-    const eventSource = new EventSource(`${API_CONFIG.BASE_URL}/api/ai/stream?conversationId=${convId}`);
+    sseConvIdRef.current = convId;
+    console.log('[connectSSE] sseConvIdRef set to:', convId);
+
+    const eventSource = new EventSource(`${apiConfigRef.current.BASE_URL}/api/ai/stream?conversationId=${convId}`);
     eventSourceRef.current = eventSource;
 
-    eventSource.addEventListener('connected', (e) => {
-      console.log('[SSE] Connected', e.data);
-    });
-
     eventSource.addEventListener('history', (e) => {
-      console.log('[SSE] History message', e.data);
       const msg = JSON.parse(e.data);
-      if (msg.role === 'assistant') {
-        setMessages(prev => {
-          // 检查是否已有相同的 commandId 消息，有则更新
-          const existingIndex = prev.findIndex(m => m.commandId === msg.commandId);
-          if (existingIndex >= 0) {
-            const updated = [...prev];
-            updated[existingIndex] = { ...updated[existingIndex], content: msg.content };
-            return updated;
-          }
-          return [...prev, {
-            id: Date.now() + Math.random(),
-            role: msg.role,
-            content: msg.content,
-            commandId: msg.commandId
-          }];
-        });
-      } else {
-        // 用户消息也添加到历史中
-        setMessages(prev => [...prev, {
-          id: Date.now() + Math.random(),
+      if (!msg.commandId) return;
+      setMessages(prev => {
+        const existingIndex = prev.findIndex(m => m.commandId === msg.commandId);
+        if (existingIndex >= 0) {
+          return prev;
+        }
+        return [...prev, {
+          id: `${msg.commandId}-${msg.role}`,
           role: msg.role,
           content: msg.content,
           commandId: msg.commandId
-        }]);
-      }
+        }];
+      });
     });
 
     eventSource.addEventListener('history_done', (e) => {
-      console.log('[SSE] History done');
     });
 
     eventSource.addEventListener('chunk', (e) => {
-      console.log('[SSE] Chunk received:', e.data);
       const data = JSON.parse(e.data);
+      console.log('[chunk]', data.id, 'len:', data.content.length, 'preview:', data.content.substring(0, 30));
 
       setMessages(prev => {
-        // 查找是否有这个 commandId 的消息
+        console.log('[chunk] prev count:', prev.length);
+
+        // 优先查找是否有已转换的 assistant 消息（commandId 为 data.id + '-assistant'）
+        const convertedIndex = prev.findIndex(m => m.commandId === data.id + '-assistant');
+        if (convertedIndex >= 0) {
+          console.log('[chunk] found converted message, updating');
+          const updated = [...prev];
+          updated[convertedIndex] = { ...updated[convertedIndex], content: data.content };
+          return updated;
+        }
+
+        // 查找原始 commandId
         const existingIndex = prev.findIndex(m => m.commandId === data.id);
+        console.log('[chunk] existingIndex:', existingIndex, 'existing role:', existingIndex >= 0 ? prev[existingIndex].role : 'none');
         if (existingIndex >= 0) {
-          // 追加内容
+          // 如果已存在的消息是 user 的，不覆盖，直接创建新消息
+          if (prev[existingIndex].role === 'user') {
+            console.log('[chunk] found user message with same commandId, creating new assistant message instead');
+            convertedCommandIdsRef.current.add(data.id);
+            return [...prev, {
+              id: data.id.toString() + '-assistant',
+              role: 'assistant',
+              content: data.content,
+              commandId: data.id + '-assistant'
+            }];
+          }
+          // 正常更新 assistant 消息
           const updated = [...prev];
           updated[existingIndex] = {
             ...updated[existingIndex],
-            content: updated[existingIndex].content + data.content
+            content: data.content
           };
           return updated;
         } else {
-          // 新建消息
+          // 检查是否已转换过（避免重复创建）
+          if (convertedCommandIdsRef.current.has(data.id)) {
+            console.log('[chunk] already converted, skipping');
+            return prev;
+          }
+          console.log('[chunk] creating new message with role: assistant, commandId:', data.id);
           return [...prev, {
-            id: Date.now() + Math.random(),
+            id: data.id.toString(),
             role: 'assistant',
             content: data.content,
             commandId: data.id
@@ -119,7 +159,7 @@ function AICommand() {
     });
 
     eventSource.addEventListener('done', (e) => {
-      console.log('[SSE] Done', e.data);
+      console.log('[SSE] Done');
       setSending(false);
     });
 
@@ -136,7 +176,13 @@ function AICommand() {
 
   // 切换会话时重新连接 SSE
   useEffect(() => {
+    console.log('[useEffect] loading:', loading, 'convId:', conversationId);
     if (!loading && conversationId) {
+      console.log('[useEffect] connecting SSE to', conversationId);
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
       connectSSE(conversationId);
     }
     return () => {
@@ -144,6 +190,7 @@ function AICommand() {
         eventSourceRef.current.close();
         eventSourceRef.current = null;
       }
+      sseConvIdRef.current = null;
     };
   }, [loading, conversationId, connectSSE]);
 
@@ -154,7 +201,7 @@ function AICommand() {
   // 加载会话列表
   const loadConversations = async () => {
     try {
-      const response = await fetch(`${API_CONFIG.BASE_URL}/api/conversations`, {
+      const response = await fetch(`${apiConfigRef.current.BASE_URL}/api/conversations`, {
         credentials: 'include'
       });
       if (!response.ok) {
@@ -162,7 +209,6 @@ function AICommand() {
         return;
       }
       const data = await response.json();
-      console.log('加载会话成功:', data.conversations);
       setConversations(data.conversations || []);
       if (data.conversations && data.conversations.length > 0) {
         const latestConv = data.conversations[0];
@@ -178,6 +224,7 @@ function AICommand() {
   const handleNewConversation = () => {
     setMessages([]);
     setConversationId(null);
+    convertedCommandIdsRef.current.clear();
   };
 
   // 删除会话
@@ -186,7 +233,7 @@ function AICommand() {
     if (deleting) return;
     setDeleting(true);
     try {
-      const response = await fetch(`${API_CONFIG.BASE_URL}/api/conversations/${convId}`, {
+      const response = await fetch(`${apiConfigRef.current.BASE_URL}/api/conversations/${convId}`, {
         method: 'DELETE',
         credentials: 'include'
       });
@@ -213,6 +260,7 @@ function AICommand() {
   // 切换会话
   const handleSelectConversation = (conv) => {
     setConversationId(conv.id);
+    convertedCommandIdsRef.current.clear();
     loadMessages(conv.id);
     setShowSidebar(false);
   };
@@ -220,14 +268,14 @@ function AICommand() {
   // 加载指定会话的消息
   const loadMessages = async (convId) => {
     try {
-      const response = await fetch(`${API_CONFIG.BASE_URL}/api/conversations/${convId}/messages`, {
+      const response = await fetch(`${apiConfigRef.current.BASE_URL}/api/conversations/${convId}/messages`, {
         credentials: 'include'
       });
       if (!response.ok) return;
       const data = await response.json();
       if (data.messages) {
-        setMessages(data.messages.map(msg => ({
-          id: Date.now() + Math.random(),
+        setMessages(data.messages.map((msg, idx) => ({
+          id: msg.commandId ? `${msg.commandId}-${msg.role}` : `loaded-${idx}`,
           role: msg.role,
           content: msg.content,
           commandId: msg.commandId
@@ -238,9 +286,9 @@ function AICommand() {
     }
   };
 
-  const checkAuth = async () => {
+  const checkAuth = async (baseUrl) => {
     try {
-      const response = await fetch(`${API_CONFIG.BASE_URL}/api/auth/me`, {
+      const response = await fetch(`${baseUrl}/api/auth/me`, {
         credentials: 'include'
       });
 
@@ -263,7 +311,7 @@ function AICommand() {
     if (!input.trim() || sending) return;
 
     const userMessage = {
-      id: Date.now(),
+      id: 'user-' + Date.now(),
       role: 'user',
       content: input
     };
@@ -274,7 +322,7 @@ function AICommand() {
     setSending(true);
 
     try {
-      const response = await fetch(`${API_CONFIG.BASE_URL}/api/ai/command`, {
+      const response = await fetch(`${apiConfigRef.current.BASE_URL}/api/ai/command`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -288,18 +336,19 @@ function AICommand() {
 
       if (!data.success) {
         setMessages(prev => [...prev, {
-          id: Date.now() + 1,
+          id: 'error-' + Date.now(),
           role: 'assistant',
           content: data.error || '发送失败',
           commandId: null
         }]);
         setSending(false);
+      } else if (data.conversationId && data.conversationId !== conversationId) {
+        console.log('[handleSend] New conv:', data.conversationId, 'old:', conversationId);
+        setConversationId(data.conversationId);
       }
-      // 成功时等待 SSE 推送，发送按钮保持禁用状态直到 done 事件
-
     } catch (err) {
       setMessages(prev => [...prev, {
-        id: Date.now() + 1,
+        id: 'neterror-' + Date.now(),
         role: 'assistant',
         content: '网络错误，请重试',
         commandId: null
@@ -310,7 +359,7 @@ function AICommand() {
 
   const handleLogout = async () => {
     try {
-      await fetch(`${API_CONFIG.BASE_URL}/api/auth/logout`, {
+      await fetch(`${apiConfigRef.current.BASE_URL}/api/auth/logout`, {
         method: 'POST',
         credentials: 'include'
       });
@@ -371,12 +420,14 @@ function AICommand() {
       )}
 
       <div className="chat-messages">
-        <div className="welcome-message">
-          <p>👋 你好！我是 AI 助手</p>
-          <p>有什么我可以帮你的吗？</p>
-        </div>
+        {messages.length === 0 && !sending && (
+          <div className="welcome-message">
+            <p>👋 你好！我是 AI 助手</p>
+            <p>有什么我可以帮你的吗？</p>
+          </div>
+        )}
 
-        {messages.map((message) => (
+        {messages.map((message, index) => (
           <div
             key={message.id}
             className={`message ${message.role === 'user' ? 'user-message' : 'assistant-message'}`}
@@ -387,7 +438,7 @@ function AICommand() {
             <div className="message-content">
               {message.role === 'assistant' ? (
                 <div className="message-text">
-                  <ReactMarkdown>{sending && message.commandId ? message.content + ' ▌' : message.content}</ReactMarkdown>
+                  <ReactMarkdown>{message.content}</ReactMarkdown>
                 </div>
               ) : (
                 <div className="message-text">{message.content}</div>
@@ -395,6 +446,22 @@ function AICommand() {
             </div>
           </div>
         ))}
+
+
+        {sending && (
+          <div className="message assistant-message">
+            <div className="message-avatar">🤖</div>
+            <div className="message-content">
+              <div className="message-text">
+                <span className="thinking-text">思考中</span>
+                <span className="thinking-dot">.</span>
+                <span className="thinking-dot">.</span>
+                <span className="thinking-dot">.</span>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div ref={messagesEndRef} />
       </div>
 

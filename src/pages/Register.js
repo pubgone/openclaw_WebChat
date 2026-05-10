@@ -1,6 +1,16 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import API_CONFIG from '../config';
+
+// 动态获取 API 配置
+const getApiConfig = async () => {
+  try {
+    const response = await fetch('/api-config.json');
+    const config = await response.json();
+    return config.API_BASE_URL;
+  } catch {
+    return 'http://localhost:4000';
+  }
+};
 
 function Register() {
   const [username, setUsername] = useState('');
@@ -9,7 +19,12 @@ function Register() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [baseUrl, setBaseUrl] = useState('http://localhost:4000');
   const navigate = useNavigate();
+
+  useEffect(() => {
+    getApiConfig().then(url => setBaseUrl(url));
+  }, []);
 
   // 密码强度检查
   const getPasswordStrength = (pwd) => {
@@ -57,7 +72,7 @@ function Register() {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_CONFIG.BASE_URL}/api/auth/register`, {
+      const response = await fetch(`${baseUrl}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',

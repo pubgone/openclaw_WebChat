@@ -6,6 +6,7 @@ const AGENT_WS_URL = 'ws://127.0.0.1:18789/v1/agent/chat';
 // Shared token
 const SHARED_TOKEN = 'f62f02fb948ee39b74b418f1f4fc3d4b0805764c6ace19c1';
 
+//使用let因为变量会动态变化
 let ws = null;
 let reconnectTimer = null;
 let isConnected = false;
@@ -95,13 +96,13 @@ const connect = () => {
           return;
         }
 
-        // session.message - AI 回复
-        if (message.type === 'event' && message.event === 'session.message') {
-          if (chatMessageCallback) {
-            chatMessageCallback(message.payload);
-          }
-          return;
-        }
+        // session.message - 已废弃，不再使用，避免与 agent 事件重复
+        // if (message.type === 'event' && message.event === 'session.message') {
+        //   if (chatMessageCallback) {
+        //     chatMessageCallback(message.payload);
+        //   }
+        //   return;
+        // }
 
         // agent 事件 - AI 回复（流式 chunk）
         if (message.type === 'event' && message.event === 'agent') {
@@ -111,6 +112,7 @@ const connect = () => {
             const receiveTime = Date.now();
             const commandId = pendingCommandIds[0] || Date.now().toString();
             const conversationId = commandIdToConvId.get(commandId) || commandId;
+            console.log(`[agent-chunk] pendingCommandIds.length=${pendingCommandIds.length} commandId=${commandId} conversationId=${conversationId} textLen=${payload.data.text.length}`);
             logger.ws.messageReceived(commandId, 'agent-chunk');
             if (chatMessageCallback) {
               chatMessageCallback({ content: payload.data.text, commandId: commandId, conversationId: conversationId, isFinal: false });
@@ -168,17 +170,17 @@ const sendConnectRequest = () => {
   console.log('[WebSocket] Auth with: shared token + openclaw-control-ui client');
 
   const connectRequest = {
-    type: 'req',
-    id: '1',
-    method: 'connect',
+    type: 'req',  // 这是一个请求
+    id: '1',  // 请求 ID（用于匹配响应）
+    method: 'connect',  // 方法名：连接
     params: {
-      minProtocol: 3,
-      maxProtocol: 3,
-      client: { id: 'openclaw-control-ui', version: 'control-ui', platform: 'Win32', mode: 'webchat' },
-      role: 'operator',
-      scopes: ['operator.read', 'operator.write'],
-      auth: { token: SHARED_TOKEN },
-      locale: 'zh-CN'
+      minProtocol: 3,  // 最低支持协议版本
+      maxProtocol: 3,   // 最高支持协议版本
+      client: { id: 'openclaw-control-ui', version: 'control-ui', platform: 'Win32', mode: 'webchat' },// 客户端信息{id: 客户端标识，version：版本，platform：平台信息，mode：使用场景}
+      role: 'operator', // 角色：操作员
+      scopes: ['operator.read', 'operator.write'], // 权限范围
+      auth: { token: SHARED_TOKEN },// 认证令牌
+      locale: 'zh-CN' // 语言：中文
     }
   };
 
@@ -187,7 +189,7 @@ const sendConnectRequest = () => {
 };
 
 // 发送聊天消息
-const sendChatMessage = (content, commandId, conversationId) => {
+const sendChatMessage = (content, commandId, conversationId, userId) => {
   return new Promise((resolve, reject) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       console.error('[WebSocket] Not connected');
@@ -196,6 +198,7 @@ const sendChatMessage = (content, commandId, conversationId) => {
     }
 
     const id = commandId || Math.random().toString(36);
+    const sessionKey = `user_${userId}_${conversationId || 'default'}`;
     const msg = {
       type: 'req',
       id: id,
@@ -203,13 +206,14 @@ const sendChatMessage = (content, commandId, conversationId) => {
       params: {
         message: content,
         idempotencyKey: id,
-        sessionKey: 'main'
+        sessionKey: sessionKey
       }
     };
 
     // 将 commandId 加入待处理队列，并保存 commandId 到 conversationId 的映射
     pendingCommandIds.push(commandId);
-    commandIdToConvId.set(commandId, conversationId);
+    commandIdToConvId.set(commandId, conversationId || id);
+    console.log(`[sendChatMessage] commandId=${commandId} conversationId=${conversationId} userId=${userId} sessionKey=${sessionKey} pendingCommandIds.length=${pendingCommandIds.length}`);
 
     const sendTime = Date.now();
     logger.ws.messageSent(commandId, content);

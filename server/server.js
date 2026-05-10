@@ -1,4 +1,30 @@
 const express = require('express');
+const os = require('os');
+
+// 获取本机 IP 地址
+function getLocalIP() {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+  return '0.0.0.0';
+}
+
+const LOCAL_IP = getLocalIP();
+console.log(`[启动] 本机IP: ${LOCAL_IP}`);
+
+// 生成前端配置文件
+const fs = require('fs');
+const path = require('path');
+const configPath = path.join(__dirname, '../public/api-config.json');
+const frontendUrl = `http://${LOCAL_IP}:4000`;
+fs.writeFileSync(configPath, JSON.stringify({ API_BASE_URL: frontendUrl }, null, 2));
+console.log(`[启动] 已生成前端配置文件: ${configPath}`);
+
 const session = require('express-session');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -19,9 +45,9 @@ const PORT = 4000;
 // Helmet - 安全 HTTP Headers
 app.use(helmet());
 
-// CORS
+// CORS - 自动允许请求来源
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://192.168.31.29:3000'],
+  origin: true,
   credentials: true
 }));
 
@@ -342,7 +368,7 @@ app.post('/api/ai/command',
       const wsStatus = websocket.getStatus();
       const wsConnected = wsStatus === websocket.STATUS.CONNECTED;
       if (wsConnected) {
-        await websocket.sendChatMessage(message, commandId, convId);
+        await websocket.sendChatMessage(message, commandId, convId, req.session.userId);
         logger.message.sent(commandId, convId, message);
       } else {
         // 如果 WebSocket 未连接，放入队列（保留轮询接口作为后备）
@@ -524,9 +550,12 @@ const sendToSSEClient = (conversationId, event, data) => {
   if (sseClients.has(conversationId)) {
     const clients = sseClients.get(conversationId);
     const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    console.log(`[SSE Push] convId:${conversationId} event:${event} clients:${clients.size} dataLen:${data.content?.length || JSON.stringify(data).length}`);
     for (const client of clients) {
       client.write(message);
     }
+  } else {
+    console.log(`[SSE Push] convId:${conversationId} event:${event} - NO CLIENTS`);
   }
 };
 
@@ -572,47 +601,34 @@ app.get('/api/ai/stream', (req, res) => {
 });
 
 // ========== WebSocket 消息处理 ==========
-// 设置聊天消息回调 - 当 Agent 通过 session.message 返回结果时
+// 设置聊天消息回调 - 处理 agent 流式 chunk 和 chat 最终回复
 websocket.setChatMessageCallback(async (payload) => {
-  if (payload.content) {
-    try {
-      const resultId = payload.commandId || Date.now().toString();
-      const conversationId = payload.conversationId;
+  if (!payload.content) return;
 
-      // 1. 通过 SSE 实时推送
+  try {
+    const resultId = payload.commandId || Date.now().toString();
+    const conversationId = payload.conversationId;
+
+    if (payload.isFinal) {
+      // chat 事件的最终回复 - 发送 done 事件
+      sendToSSEClient(conversationId, 'done', { id: resultId });
+      await redisClient.lPush('messages:pending', JSON.stringify({
+        conversationId: conversationId,
+        role: 'assistant',
+        content: payload.content,
+        commandId: resultId,
+        userId: null
+      }));
+      logger.message.persisted(resultId, 'assistant');
+    } else {
+      // agent 事件的流式 chunk - 发送 chunk 事件
       sendToSSEClient(conversationId, 'chunk', {
         id: resultId,
-        content: payload.content,
-        isFinal: payload.isFinal || false
+        content: payload.content
       });
-
-      // 2. 只有最终完成时才存入 Redis（供轮询备用）
-      if (payload.isFinal) {
-        sendToSSEClient(conversationId, 'done', {
-          id: resultId
-        });
-
-        // 同时写入 messages:pending 队列，让 Worker 持久化到 MySQL
-        await redisClient.lPush('messages:pending', JSON.stringify({
-          conversationId: conversationId,
-          role: 'assistant',
-          content: payload.content,
-          commandId: resultId,
-          userId: null
-        }));
-
-        await redisClient.lPush('ai:results:pending', JSON.stringify({
-          id: resultId,
-          result: payload.content,
-          timestamp: new Date().toISOString()
-        }));
-        logger.message.persisted(resultId, 'assistant');
-      }
-
-      logger.message.received(resultId, payload.content, payload.isFinal);
-    } catch (err) {
-      logger.sse.pushFailed(conversationId, err.message);
     }
+  } catch (err) {
+    logger.sse.pushFailed('unknown', err.message);
   }
 });
 
