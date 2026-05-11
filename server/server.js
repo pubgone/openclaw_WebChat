@@ -560,10 +560,30 @@ const sendToSSEClient = (conversationId, event, data) => {
 };
 
 // SSE 流式端点
-app.get('/api/ai/stream', (req, res) => {
+app.get('/api/ai/stream', async (req, res) => {
   const { conversationId } = req.query;
   if (!conversationId) {
     return res.status(400).json({ error: 'conversationId required' });
+  }
+
+  // 验证用户已登录
+  if (!req.session.userId) {
+    return res.status(401).json({ error: '请先登录' });
+  }
+
+  // 验证会话是否属于当前用户
+  try {
+    const [convRows] = await pool.execute(
+      'SELECT id FROM conversations WHERE id = ? AND user_id = ?',
+      [conversationId, req.session.userId]
+    );
+
+    if (convRows.length === 0) {
+      return res.status(403).json({ error: '无权访问此会话' });
+    }
+  } catch (err) {
+    console.error('会话验证错误:', err);
+    return res.status(500).json({ error: '会话验证失败' });
   }
 
   // 设置 SSE headers
@@ -654,6 +674,17 @@ app.get('/api/conversations/:conversationId/messages', async (req, res) => {
     if (!req.session.userId) {
       return res.status(401).json({ error: '请先登录' });
     }
+
+    // 验证会话是否属于当前用户（防止会话ID枚举漏洞）
+    const [convRows] = await pool.execute(
+      'SELECT id FROM conversations WHERE id = ? AND user_id = ?',
+      [req.params.conversationId, req.session.userId]
+    );
+
+    if (convRows.length === 0) {
+      return res.status(403).json({ error: '无权访问此会话' });
+    }
+
     const messages = await getMessagesByConversationId(req.params.conversationId);
     res.json({ messages });
   } catch (error) {
@@ -668,13 +699,27 @@ app.delete('/api/conversations/:conversationId', async (req, res) => {
     if (!req.session.userId) {
       return res.status(401).json({ error: '请先登录' });
     }
+
     const { conversationId } = req.params;
+
+    // 验证会话是否属于当前用户
+    const [convRows] = await pool.execute(
+      'SELECT id FROM conversations WHERE id = ? AND user_id = ?',
+      [conversationId, req.session.userId]
+    );
+
+    if (convRows.length === 0) {
+      return res.status(403).json({ error: '无权删除此会话' });
+    }
+
     // 删除会话下的所有消息
     await pool.execute('DELETE FROM messages WHERE conversation_id = ?', [conversationId]);
     // 删除会话
-    await pool.execute('DELETE FROM conversations WHERE id = ? AND user_id = ?', [conversationId, req.session.userId]);
+    await pool.execute('DELETE FROM conversations WHERE id = ? AND user_id = ?',
+      [conversationId, req.session.userId]);
     // 清除缓存
     await redisClient.del(`conversations:${req.session.userId}`);
+    await redisClient.del(`messages:${conversationId}`);
     res.json({ success: true });
   } catch (error) {
     console.error('删除会话错误:', error);
