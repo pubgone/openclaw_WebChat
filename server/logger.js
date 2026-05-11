@@ -144,6 +144,17 @@ const logger = {
     operationFailed: (operation, error) => writeLog('ERROR', 'REDIS', '操作失败', { operation, error }),
   },
 
+  // 缓存模块
+  cache: {
+    miss: (key) => writeLog('INFO', 'CACHE', '缓存未命中', { key }),
+    hit: (key, age) => writeLog('INFO', 'CACHE', '缓存命中', { key, age: `${age}s ago` }),
+    expired: (key) => writeLog('INFO', 'CACHE', '缓存过期', { key }),
+    set: (key, ttl) => writeLog('INFO', 'CACHE', '缓存设置', { key, ttl: `${ttl}s` }),
+    delete: (key) => writeLog('INFO', 'CACHE', '缓存删除', { key }),
+    refresh: (key) => writeLog('INFO', 'CACHE', '缓存刷新', { key }),
+    error: (operation, error) => writeLog('ERROR', 'CACHE', '缓存错误', { operation, error }),
+  },
+
   // Worker模块
   worker: {
     started: () => writeLog('INFO', 'WORKER', 'Worker启动', null),

@@ -1,5 +1,6 @@
 const mysql = require('mysql2/promise');
 const { createClient } = require('redis');
+const logger = require('./logger');
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
@@ -19,38 +20,70 @@ const pool = mysql.createPool({
 const redisClient = createClient({ url: 'redis://localhost:6379' });
 redisClient.on('error', (err) => console.log('Redis Cache Error', err));
 
-const CACHE_TTL = 300; // 5分钟
+const CACHE_TTL = 60; // 1分钟（原5分钟，缩短提升一致性）
 
 // ========== Redis 缓存工具 ==========
+
+// 缓存数据结构：{ _t: 时间戳, d: 数据 }
 
 const getCache = async (key) => {
   try {
     const data = await redisClient.get(key);
-    return data ? JSON.parse(data) : null;
+    if (!data) {
+      logger.cache.miss(key);
+      return null;
+    }
+
+    const cache = JSON.parse(data);
+    const cacheTime = cache._t || 0;
+    const now = Date.now();
+
+    // 检查缓存是否过期
+    if (now - cacheTime > CACHE_TTL * 1000) {
+      // 缓存过期，删除并返回 null
+      logger.cache.expired(key);
+      await redisClient.del(key);
+      return null;
+    }
+
+    const age = Math.round((now - cacheTime) / 1000);
+    logger.cache.hit(key, age);
+    return cache.d;
   } catch (err) {
-    console.error('Cache get error:', err);
+    logger.cache.error('get', err.message);
     return null;
   }
 };
 
 const setCache = async (key, value, ttl = CACHE_TTL) => {
   try {
-    await redisClient.setEx(key, ttl, JSON.stringify(value));
+    // 存入缓存数据 + 时间戳
+    const cache = { _t: Date.now(), d: value };
+    await redisClient.setEx(key, ttl, JSON.stringify(cache));
+    logger.cache.set(key, ttl);
   } catch (err) {
-    console.error('Cache set error:', err);
+    logger.cache.error('set', err.message);
   }
 };
 
 const deleteCache = async (key) => {
   try {
     await redisClient.del(key);
+    logger.cache.delete(key);
   } catch (err) {
-    console.error('Cache delete error:', err);
+    logger.cache.error('delete', err.message);
   }
 };
 
+// 双删策略：删除缓存后延迟再删除（防止并发读导致缓存重建）
+const deleteCacheWithDelay = async (key, delayMs = 500) => {
+  await deleteCache(key);
+  setTimeout(() => deleteCache(key), delayMs);
+};
+
 const invalidateUserCache = async (userId) => {
-  await deleteCache(`conversations:${userId}`);
+  // 双删策略
+  await deleteCacheWithDelay(`conversations:${userId}`);
 };
 
 // ========== 会话操作 ==========
@@ -62,29 +95,50 @@ const createConversation = async (userId, title) => {
     'INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
     [id, userId, title || '', now, now]
   );
-  await invalidateUserCache(userId);
+  // 双删策略：立即删除 + 延迟500ms后再删除
+  await deleteCacheWithDelay(`conversations:${userId}`);
   return { id, userId, title, createdAt: now, updatedAt: now };
 };
 
 const getConversationsByUserId = async (userId) => {
   const cacheKey = `conversations:${userId}`;
   const cached = await getCache(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    // 缓存命中 → 立即返回，同时后台异步刷新
+    refreshCacheAsync(() => queryConversationsFromDB(userId), cacheKey);
+    return cached;
+  }
 
+  // 缓存未命中 → 必须查数据库
+  const conversations = await queryConversationsFromDB(userId);
+  await setCache(cacheKey, conversations);
+  return conversations;
+};
+
+// 查询会话列表（供缓存刷新复用）
+const queryConversationsFromDB = async (userId) => {
   const [rows] = await pool.execute(
     'SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC',
     [userId]
   );
-  const conversations = rows.map(row => ({
+  return rows.map(row => ({
     id: row.id,
     userId: row.user_id,
     title: row.title,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   }));
+};
 
-  await setCache(cacheKey, conversations);
-  return conversations;
+// 后台异步刷新缓存
+const refreshCacheAsync = async (queryFn, cacheKey) => {
+  try {
+    const data = await queryFn();
+    await setCache(cacheKey, data);
+    logger.cache.refresh(cacheKey);
+  } catch (err) {
+    logger.cache.error('refresh', err.message);
+  }
 };
 
 const updateConversationUpdatedAt = async (conversationId) => {
@@ -104,20 +158,33 @@ const saveMessage = async (conversationId, role, content, commandId = null) => {
     [id, conversationId, role, content, commandId, now]
   );
   await updateConversationUpdatedAt(conversationId);
-  await deleteCache(`messages:${conversationId}`);
+  // 双删策略：立即删除 + 延迟500ms后再删除
+  await deleteCacheWithDelay(`messages:${conversationId}`);
   return { id, conversationId, role, content, commandId, createdAt: now };
 };
 
 const getMessagesByConversationId = async (conversationId) => {
   const cacheKey = `messages:${conversationId}`;
   const cached = await getCache(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    // 缓存命中 → 立即返回，同时后台异步刷新
+    refreshCacheAsync(() => queryMessagesFromDB(conversationId), cacheKey);
+    return cached;
+  }
 
+  // 缓存未命中 → 必须查数据库
+  const messages = await queryMessagesFromDB(conversationId);
+  await setCache(cacheKey, messages);
+  return messages;
+};
+
+// 查询消息列表（供缓存刷新复用）
+const queryMessagesFromDB = async (conversationId) => {
   const [rows] = await pool.execute(
     'SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC',
     [conversationId]
   );
-  const messages = rows.map(row => ({
+  return rows.map(row => ({
     id: row.id,
     conversationId: row.conversation_id,
     role: row.role,
@@ -125,9 +192,6 @@ const getMessagesByConversationId = async (conversationId) => {
     commandId: row.command_id,
     createdAt: row.created_at
   }));
-
-  await setCache(cacheKey, messages);
-  return messages;
 };
 
 const updateMessageByCommandId = async (commandId, content) => {
