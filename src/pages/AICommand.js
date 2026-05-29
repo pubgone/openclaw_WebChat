@@ -67,7 +67,7 @@ function AICommand() {
     }
   }, [loading]);
 
-  // 连接 SSE 获取流式响应
+  // 连接 SSE 获取流式响应（使用 fetch + ReadableStream 替代 EventSource，支持 credentials）
   const connectSSE = useCallback((convId) => {
     console.log('[connectSSE] connecting to:', convId);
 
@@ -80,11 +80,58 @@ function AICommand() {
     sseConvIdRef.current = convId;
     console.log('[connectSSE] sseConvIdRef set to:', convId);
 
-    const eventSource = new EventSource(`${apiConfigRef.current.BASE_URL}/api/ai/stream?conversationId=${convId}`);
-    eventSourceRef.current = eventSource;
+    // 使用 fetch + ReadableStream 替代 EventSource，支持 credentials
+    fetch(`${apiConfigRef.current.BASE_URL}/api/ai/stream?conversationId=${convId}`, {
+      credentials: 'include'
+    }).then(async (response) => {
+      if (!response.ok) {
+        console.error('[connectSSE] Response not ok:', response.status);
+        return;
+      }
 
-    eventSource.addEventListener('history', (e) => {
-      const msg = JSON.parse(e.data);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        // 逐行解析 SSE 格式：event: xxx\ndata: yyy\n\n
+        for (let i = 0; i < lines.length - 1; i++) {
+          const line = lines[i];
+          if (line.startsWith('event:')) {
+            const eventType = line.slice(6).trim();
+            const dataLine = lines[i + 1];
+            if (dataLine && dataLine.startsWith('data:')) {
+              const dataStr = dataLine.slice(5).trim();
+              try {
+                const data = JSON.parse(dataStr);
+                // 根据事件类型调用对应处理
+                if (eventType === 'history') {
+                  handleHistory(data);
+                } else if (eventType === 'chunk') {
+                  handleChunk(data);
+                } else if (eventType === 'done') {
+                  handleDone();
+                }
+              } catch (e) {
+                console.error('[connectSSE] Parse error:', e);
+              }
+            }
+          }
+        }
+      }
+    }).catch((err) => {
+      console.error('[connectSSE] Fetch error:', err);
+    });
+
+    // history 事件处理
+    const handleHistory = (msg) => {
       if (!msg.commandId) return;
       setMessages(prev => {
         const existingIndex = prev.findIndex(m => m.commandId === msg.commandId);
@@ -98,13 +145,10 @@ function AICommand() {
           commandId: msg.commandId
         }];
       });
-    });
+    };
 
-    eventSource.addEventListener('history_done', (e) => {
-    });
-
-    eventSource.addEventListener('chunk', (e) => {
-      const data = JSON.parse(e.data);
+    // chunk 事件处理
+    const handleChunk = (data) => {
       console.log('[chunk]', data.id, 'len:', data.content.length, 'preview:', data.content.substring(0, 30));
 
       setMessages(prev => {
@@ -156,22 +200,16 @@ function AICommand() {
           }];
         }
       });
-    });
+    };
 
-    eventSource.addEventListener('done', (e) => {
+    // done 事件处理
+    const handleDone = () => {
       console.log('[SSE] Done');
       setSending(false);
-    });
-
-    eventSource.addEventListener('error', (e) => {
-      console.error('[SSE] Error', e);
-      eventSource.close();
-      eventSourceRef.current = null;
-    });
-
-    return () => {
-      eventSource.close();
     };
+
+    // 标记已建立连接（用于清理）
+    eventSourceRef.current = { close: () => {} };
   }, []);
 
   // 切换会话时重新连接 SSE
